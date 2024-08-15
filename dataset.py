@@ -6,9 +6,11 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 class SiameseDataset(Dataset):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, transform=None, img_size=(224, 224)):
         self.root_dir = root_dir
         self.image_pairs = self._load_image_pairs()
+        self.transform = transform
+        self.img_size = img_size
     
     def _load_image_pairs(self):
         image_pairs = []
@@ -27,6 +29,7 @@ class SiameseDataset(Dataset):
 
     def _load_image(self, img_path):
         img = cv2.imread(img_path)
+        img = cv2.resize(img, self.img_size)  # Resize the image to a consistent size
         return img
 
     def _load_landmarks(self, pts_path):
@@ -58,5 +61,9 @@ class SiameseDataset(Dataset):
         normal_img = self._load_image(normal_img_path)
         mirror_img = self._load_image(mirror_img_path)
         landmarks = self._load_landmarks(pts_path)
+        
+        if self.transform:
+            normal_img = self.transform(normal_img)
+            mirror_img = self.transform(mirror_img)
         
         return normal_img, mirror_img, landmarks
