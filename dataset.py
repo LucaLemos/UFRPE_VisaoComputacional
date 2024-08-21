@@ -1,11 +1,9 @@
 import os
 import cv2
 import numpy as np
-import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
 
-class SiameseDataset(Dataset):
+class Dataset(Dataset):
     def __init__(self, root_dir, transform=None, img_size=(224, 224)):
         self.root_dir = root_dir
         self.image_pairs = self._load_image_pairs()
@@ -29,7 +27,8 @@ class SiameseDataset(Dataset):
 
     def _load_image(self, img_path):
         img = cv2.imread(img_path)
-        img = cv2.resize(img, self.img_size)  # Resize the image to a consistent size
+        if img is None:
+            raise ValueError(f"Failed to load image at {img_path}")
         return img
 
     def _load_landmarks(self, pts_path):
@@ -52,6 +51,21 @@ class SiameseDataset(Dataset):
         
         return np.array(points)
     
+    def _resize_image_and_landmarks(self, img, landmarks):
+        original_size = img.shape[:2]  # (height, width)
+        img_resized = cv2.resize(img, self.img_size)
+        
+        # Calculate scaling factors
+        scale_x = self.img_size[0] / original_size[1]  # new width / old width
+        scale_y = self.img_size[1] / original_size[0]  # new height / old height
+        
+        # Scale the landmarks
+        landmarks_resized = landmarks.copy()
+        landmarks_resized[:, 0] *= scale_x  # x-coordinates
+        landmarks_resized[:, 1] *= scale_y  # y-coordinates
+        
+        return img_resized, landmarks_resized
+    
     def __len__(self):
         return len(self.image_pairs)
     
@@ -61,6 +75,9 @@ class SiameseDataset(Dataset):
         normal_img = self._load_image(normal_img_path)
         mirror_img = self._load_image(mirror_img_path)
         landmarks = self._load_landmarks(pts_path)
+
+        normal_img, landmarks = self._resize_image_and_landmarks(normal_img, landmarks)
+        mirror_img, _ = self._resize_image_and_landmarks(mirror_img, landmarks)
         
         if self.transform:
             normal_img = self.transform(normal_img)
