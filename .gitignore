@@ -1,3 +1,5 @@
 archive/
 
 model/
+
+__pycache__/
