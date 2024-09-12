@@ -1,69 +1,74 @@
 import os
-import cv2
 import numpy as np
+import torch
 from torch.utils.data import Dataset
+from PIL import Image
 
 class FacialLandmarkDataset(Dataset):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, transform=None):
         self.root_dir = root_dir
-        self.image_files, self.landmark_files = self._load_files()
-    
-    def _load_files(self):
-        image_files = {}
-        landmark_files = {}
+        self.transform = transform
+        self.image_pairs = self._load_image_pairs()  # Update to load image pairs
 
-        # Loop through the directory and collect image files and their corresponding landmarks
+    def _load_image_pairs(self):
+        image_pairs = []
         for filename in os.listdir(self.root_dir):
-            if filename.endswith('.jpg'):
-                base_filename = filename.split('_')[0]  # Keep only the base of the filename (without _1, _2)
-                img_path = os.path.join(self.root_dir, filename)
-                if base_filename not in image_files:
-                    image_files[base_filename] = img_path
+            if filename.endswith('.jpg') and '_mirror' not in filename:
+                normal_img_path = os.path.join(self.root_dir, filename)
+                pts_file = filename.replace('.jpg', '.pts')
+                pts_path = os.path.join(self.root_dir, pts_file)
                 
-            if filename.endswith('.pts'):
-                base_filename = filename.split('_')[0]  # Keep the same base to associate with the image
-                pts_path = os.path.join(self.root_dir, filename)
-                if base_filename not in landmark_files:
-                    landmark_files[base_filename] = []
-                landmark_files[base_filename].append(pts_path)
+                if os.path.isfile(pts_path):
+                    image_pairs.append((normal_img_path, pts_path))
+        
+        return image_pairs
 
-        return list(image_files.values()), landmark_files
+    def _load_landmarks(self, pts_path):
+        with open(pts_path, 'r') as file:
+            lines = file.readlines()
+        points = []
+        reading_points = False
+        for line in lines:
+            line = line.strip()
+            if line.startswith('{'):
+                reading_points = True
+                continue
+            if reading_points:
+                if line.startswith('}'):
+                    break
+                x, y = map(float, line.split())
+                points.append((x, y))
+        return np.array(points)
 
-    def _load_image(self, img_path):
-        img = cv2.imread(img_path)
-        if img is None:
-            raise ValueError(f"Failed to load image at {img_path}")
-        return img
+    def _transform_landmarks(self, landmarks, original_width, original_height):
+        # Apply scaling to landmarks
+        scale_x = 224 / original_width
+        scale_y = 224 / original_height
+        landmarks = [(x * scale_x, y * scale_y) for x, y in landmarks]
+        return np.array(landmarks)
 
-    def _load_landmarks(self, pts_paths):
-        all_landmarks = []
-        for pts_path in pts_paths:
-            with open(pts_path, 'r') as file:
-                lines = file.readlines()
-            points = []
-            reading_points = False
-            for line in lines:
-                line = line.strip()
-                if line.startswith('{'):
-                    reading_points = True
-                    continue
-                if reading_points:
-                    if line.startswith('}'):
-                        break
-                    x, y = map(float, line.split())
-                    points.append((x, y))
-            all_landmarks.append(np.array(points))
-        return np.array(all_landmarks)
-    
     def __len__(self):
-        return len(self.image_files)
+        return len(self.image_pairs)
     
     def __getitem__(self, idx):
-        img_path = self.image_files[idx]
-        base_filename = os.path.basename(img_path).split('_')[0]
-        pts_paths = self.landmark_files[base_filename]
+        img_path, pts_path = self.image_pairs[idx]
         
-        img = self._load_image(img_path)
-        landmarks = self._load_landmarks(pts_paths)
+        # Load image
+        img = Image.open(img_path).convert('RGB')
+        original_width, original_height = img.size
+        
+        # Load landmarks
+        landmarks = self._load_landmarks(pts_path)
+        
+        # Apply transformations
+        if self.transform:
+            img = self.transform(img)
+        
+        # Adjust landmarks to the transformed image size
+        if self.transform:
+            img_transformed_size = (224, 224)  # Assuming resize transformation to 224x224
+            landmarks = self._transform_landmarks(landmarks, original_width, original_height)
+
+        landmarks = torch.tensor(landmarks, dtype=torch.float32).view(-1)
         
         return img, landmarks

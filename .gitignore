@@ -3,3 +3,5 @@ archive/
 model/
 
 __pycache__/
+
+best_model.pth
