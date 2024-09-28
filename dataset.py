@@ -64,32 +64,41 @@ class FacialLandmarkDataset(Dataset):
 
     def _crop_faces_and_landmarks(self, img_rgb, landmarks):
         boxes, _ = self.mtcnn.detect(img_rgb)
-    
+
         cropped_faces = []
         face_landmarks = []
-        
-        if boxes is not None:
+
+        if boxes is not None and len(landmarks) > 0:
+            # We may have more or fewer boxes than landmarks, so we ensure there's a match
             for box in boxes:
                 x1, y1, x2, y2 = box.astype(int)
                 width, height = x2 - x1, y2 - y1
                 margin = 0.4
+
+                # Expand the bounding box slightly to avoid cropping out landmarks
                 x1 = max(0, x1 - int(margin * width))
                 y1 = max(0, y1 - int(margin * height))
                 x2 = min(img_rgb.shape[1], x2 + int(margin * width))
                 y2 = min(img_rgb.shape[0], y2 + int(margin * height))
-    
-                face_crop = img_rgb[y1:y2, x1:x2]
-    
-                # Check if the face has the correct number of landmarks (68)
+
+                # Find the landmarks that are within this bounding box
                 for landmarks_set in landmarks:
-                    adjusted_landmarks = landmarks_set - np.array([x1, y1])
-    
-                    if (adjusted_landmarks[:, 0] >= 0).all() and (adjusted_landmarks[:, 0] < (x2 - x1)).all() and \
-                       (adjusted_landmarks[:, 1] >= 0).all() and (adjusted_landmarks[:, 1] < (y2 - y1)).all():
-                        if adjusted_landmarks.shape[0] == 68:  # Ensure 68 landmarks
+                    # Check if the landmarks correspond to this face by ensuring they are within the bounding box
+                    if np.all((landmarks_set[:, 0] >= x1) & (landmarks_set[:, 0] <= x2) & 
+                              (landmarks_set[:, 1] >= y1) & (landmarks_set[:, 1] <= y2)):
+                        # Adjust landmarks relative to the bounding box
+                        adjusted_landmarks = landmarks_set - np.array([x1, y1])
+
+                        # Ensure the landmarks are 68 in number and inside the box
+                        if adjusted_landmarks.shape[0] == 68:
+                            # Crop the face image
+                            face_crop = img_rgb[y1:y2, x1:x2]
+
+                            # Append the face and corresponding landmarks
                             cropped_faces.append(face_crop)
                             face_landmarks.append(adjusted_landmarks)
-                            break  # Only consider one set of landmarks per face
+                        break  # Only consider one set of landmarks per face
+
         return cropped_faces, face_landmarks
 
 
@@ -115,33 +124,56 @@ class FacialLandmarkDataset(Dataset):
         # Convert image to NumPy array if it's a tensor
         if isinstance(img, torch.Tensor):
             img = img.permute(1, 2, 0).numpy()  # Convert from (C, H, W) to (H, W, C)
-
-        # Ensure landmarks are in the format required by albumentations
+    
+        # Ensure landmarks are in the format required by albumentations (list of tuples)
         keypoints = [tuple(landmark) for landmark in landmarks]
+        
         # Apply transformations
         if self.transform:
-            # Ensure landmarks are in the correct format (list of tuples)
             augmented = self.transform(image=img, keypoints=keypoints)
             img = augmented['image']
             landmarks = np.array(augmented['keypoints'])
-
+        
         # Ensure the image is in NumPy format before resizing
         if isinstance(img, torch.Tensor):
             img = img.permute(1, 2, 0).numpy()
     
-        # Resize the image and landmarks if target size is defined
+        # Check if landmarks are still within the image bounds
+        h, w = img.shape[:2]
+        min_x, min_y = np.min(landmarks, axis=0)
+        max_x, max_y = np.max(landmarks, axis=0)
+    
+        # If any landmark is outside the image bounds, expand the image
+        if min_x < 0 or min_y < 0 or max_x > w or max_y > h:
+            # Compute padding required to fit all landmarks
+            pad_x_left = max(0, -min_x)  # Padding needed on the left
+            pad_y_top = max(0, -min_y)   # Padding needed on the top
+            pad_x_right = max(0, max_x - w)  # Padding needed on the right
+            pad_y_bottom = max(0, max_y - h)  # Padding needed on the bottom
+    
+            # Expand the image using padding, use reflect or replicate padding mode
+            img = np.pad(img, 
+                         ((pad_y_top, pad_y_bottom), (pad_x_left, pad_x_right), (0, 0)), 
+                         mode='reflect')  # 'reflect' or 'edge' (replicate) to avoid constant black padding
+    
+            # Shift landmarks to adjust for the padding
+            landmarks[:, 0] += pad_x_left
+            landmarks[:, 1] += pad_y_top
+    
+        # Resize the image and landmarks if a target size is defined
         if self.target_size:
             original_size = (img.shape[1], img.shape[0])  # (width, height)
             img = cv2.resize(img, self.target_size)
             new_size = (self.target_size[1], self.target_size[0])  # (width, height)
             
-            # Scale landmarks
+            # Scale landmarks accordingly
             scale_x = new_size[0] / original_size[0]
             scale_y = new_size[1] / original_size[1]
             landmarks = landmarks * [scale_x, scale_y]
-        # Convert image back to PIL for visualization
+    
+        # Convert image back to PIL for visualization if needed
         img = Image.fromarray(img.astype(np.uint8))  # Ensure image dtype is uint8 before converting to PIL
-            
+    
         return img, landmarks
 
     def __len__(self):
@@ -152,12 +184,15 @@ class FacialLandmarkDataset(Dataset):
         landmarks = self.face_landmarks[idx]
 
         # Apply transformations if provided
-        img, landmarks = self._apply_transform(img, landmarks)
+        img_transform, landmarks_transform = self._apply_transform(img, landmarks)
+
+        while len(landmarks_transform) != 68:
+            img_transform, landmarks_transform = self._apply_transform(img, landmarks)
 
         # Convert image to tensor
-        img = self.to_tensor(img)  # Convert PIL image to tensor
+        img_transform = self.to_tensor(img_transform)  # Convert PIL image to tensor
 
         # Convert landmarks to tensor
-        landmarks = torch.tensor(landmarks, dtype=torch.float32)  # Convert landmarks to tensor
+        landmarks_transform = torch.tensor(landmarks_transform, dtype=torch.float32)  # Convert landmarks to tensor
 
-        return img, landmarks
+        return img_transform, landmarks_transform
