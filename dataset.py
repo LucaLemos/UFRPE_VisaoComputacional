@@ -2,123 +2,46 @@ import os
 import cv2
 import numpy as np
 from torch.utils.data import Dataset
-from facenet_pytorch import MTCNN
 from PIL import Image
 import torch
 import torchvision.transforms as transforms
+import xml.etree.ElementTree as ET
 
 class FacialLandmarkDataset(Dataset):
-    def __init__(self, root_dir, target_size=(224, 224), transform=None):
+    def __init__(self, root_dir, xml_path, target_size=(224, 224), transform=None):
         self.root_dir = root_dir
+        self.xml_path = xml_path
         self.target_size = target_size
-        self.mtcnn = MTCNN(keep_all=True)
         self.transform = transform
-        self.image_files, self.landmark_files = self._load_files()
-        self.cropped_faces, self.face_landmarks = self._generate_cropped_faces_and_landmarks()
         self.to_tensor = transforms.ToTensor()
 
-    def _load_files(self):
-        image_files = {}
-        landmark_files = {}
-        for filename in os.listdir(self.root_dir):
-            if filename.endswith('.jpg'):
-                base_filename = filename.split('_')[0]
-                img_path = os.path.join(self.root_dir, filename)
-                if base_filename not in image_files:
-                    image_files[base_filename] = img_path
-            if filename.endswith('.pts'):
-                base_filename = filename.split('_')[0]
-                pts_path = os.path.join(self.root_dir, filename)
-                if base_filename not in landmark_files:
-                    landmark_files[base_filename] = []
-                landmark_files[base_filename].append(pts_path)
-        return list(image_files.values()), landmark_files
+        # Load images and landmarks from the XML file
+        self.image_files, self.face_landmarks = self._load_images_and_landmarks()
 
-    def _load_image(self, img_path):
-        img = cv2.imread(img_path)
-        if img is None:
-            raise ValueError(f"Failed to load image at {img_path}")
-        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        return img_rgb
-
-    def _load_landmarks(self, pts_paths):
-        all_landmarks = []
-        for pts_path in pts_paths:
-            with open(pts_path, 'r') as file:
-                lines = file.readlines()
-            points = []
-            reading_points = False
-            for line in lines:
-                line = line.strip()
-                if line.startswith('{'):
-                    reading_points = True
-                    continue
-                if reading_points:
-                    if line.startswith('}'):
-                        break
-                    x, y = map(float, line.split())
-                    points.append((x, y))
-            all_landmarks.append(np.array(points))
-        all_landmarks = np.array(all_landmarks)
-        return all_landmarks
-
-    def _crop_faces_and_landmarks(self, img_rgb, landmarks):
-        boxes, _ = self.mtcnn.detect(img_rgb)
-
-        cropped_faces = []
+    def _load_images_and_landmarks(self):
+        image_files = []
         face_landmarks = []
 
-        if boxes is not None and len(landmarks) > 0:
-            # We may have more or fewer boxes than landmarks, so we ensure there's a match
-            for box in boxes:
-                x1, y1, x2, y2 = box.astype(int)
-                width, height = x2 - x1, y2 - y1
-                margin = 0.4
+        # Parse the XML file
+        tree = ET.parse(self.xml_path)
+        root = tree.getroot()
 
-                # Expand the bounding box slightly to avoid cropping out landmarks
-                x1 = max(0, x1 - int(margin * width))
-                y1 = max(0, y1 - int(margin * height))
-                x2 = min(img_rgb.shape[1], x2 + int(margin * width))
-                y2 = min(img_rgb.shape[0], y2 + int(margin * height))
+        for image in root.findall('images/image'):
+            image_file = image.get('file')
+            image_path = os.path.join(self.root_dir, image_file)
 
-                # Find the landmarks that are within this bounding box
-                for landmarks_set in landmarks:
-                    # Check if the landmarks correspond to this face by ensuring they are within the bounding box
-                    if np.all((landmarks_set[:, 0] >= x1) & (landmarks_set[:, 0] <= x2) & 
-                              (landmarks_set[:, 1] >= y1) & (landmarks_set[:, 1] <= y2)):
-                        # Adjust landmarks relative to the bounding box
-                        adjusted_landmarks = landmarks_set - np.array([x1, y1])
+            landmarks = []
+            for part in image.findall('box/part'):
+                x = float(part.get('x'))
+                y = float(part.get('y'))
+                landmarks.append([x, y])
 
-                        # Ensure the landmarks are 68 in number and inside the box
-                        if adjusted_landmarks.shape[0] == 68:
-                            # Crop the face image
-                            face_crop = img_rgb[y1:y2, x1:x2]
+            # Only add images with 68 landmarks
+            if len(landmarks) == 68:
+                image_files.append(image_path)
+                face_landmarks.append(np.array(landmarks, dtype=np.float32))
 
-                            # Append the face and corresponding landmarks
-                            cropped_faces.append(face_crop)
-                            face_landmarks.append(adjusted_landmarks)
-                        break  # Only consider one set of landmarks per face
-
-        return cropped_faces, face_landmarks
-
-
-    def _generate_cropped_faces_and_landmarks(self):
-        all_cropped_faces = []
-        all_face_landmarks = []
-
-        for img_path in self.image_files:
-            base_filename = os.path.basename(img_path).split('_')[0]
-            pts_paths = self.landmark_files[base_filename]
-
-            img_rgb = self._load_image(img_path)
-            landmarks = self._load_landmarks(pts_paths)
-
-            cropped_faces, face_landmarks = self._crop_faces_and_landmarks(img_rgb, landmarks)
-
-            all_cropped_faces.extend(cropped_faces)
-            all_face_landmarks.extend(face_landmarks)
-
-        return all_cropped_faces, all_face_landmarks
+        return image_files, face_landmarks
 
     def _apply_transform(self, img, landmarks):
         # Convert image to NumPy array if it's a tensor
@@ -140,6 +63,10 @@ class FacialLandmarkDataset(Dataset):
     
         # Check if landmarks are still within the image bounds
         h, w = img.shape[:2]
+
+        if len(landmarks) != 68:
+            return img, landmarks
+
         min_x, min_y = np.min(landmarks, axis=0)
         max_x, max_y = np.max(landmarks, axis=0)
     
@@ -177,22 +104,25 @@ class FacialLandmarkDataset(Dataset):
         return img, landmarks
 
     def __len__(self):
-        return len(self.cropped_faces)
+        return len(self.image_files)
 
     def __getitem__(self, idx):
-        img = self.cropped_faces[idx]
+        img_path = self.image_files[idx]
         landmarks = self.face_landmarks[idx]
 
-        # Apply transformations if provided
+        # Load the image
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
         img_transform, landmarks_transform = self._apply_transform(img, landmarks)
 
         while len(landmarks_transform) != 68:
             img_transform, landmarks_transform = self._apply_transform(img, landmarks)
 
         # Convert image to tensor
-        img_transform = self.to_tensor(img_transform)  # Convert PIL image to tensor
+        img_transform = self.to_tensor(img_transform)
 
         # Convert landmarks to tensor
-        landmarks_transform = torch.tensor(landmarks_transform, dtype=torch.float32)  # Convert landmarks to tensor
+        landmarks_transform = torch.tensor(landmarks_transform, dtype=torch.float32)
 
         return img_transform, landmarks_transform
